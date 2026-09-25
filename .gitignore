@@ -1,0 +1,8 @@
+﻿*.exe
+*.dll
+config.json
+*.log
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
