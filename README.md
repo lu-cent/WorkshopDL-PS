@@ -1,6 +1,9 @@
 ﻿# WorkshopDL-PS
 
+![截图](https://github.com/user-attachments/assets/8762e9d3-bf45-4ee4-9f67-0654c58ec283)
+
 带图形界面的 Steam 创意工坊 Mod 批量下载器，基于 SteamCMD，零依赖。
+
 
 ## 特性
 
