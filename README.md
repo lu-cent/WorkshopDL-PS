@@ -4,18 +4,18 @@
 
 带图形界面的 Steam 创意工坊 Mod 批量下载器，基于 SteamCMD，零依赖。
 
-
 ## 特性
 
 - 纯 PowerShell + WinForms，Windows 系统自带，无需安装任何运行环境
 - 图形界面，粘贴 Mod ID 即可批量下载
 - 自动识别创意工坊链接、逗号、空格、换行等多种格式
+- 支持从 SteamCMD 脚本文件批量导入 Mod ID
 - 自动去重
 - 支持多游戏切换，配置独立保存
 - 下载后自动复制到游戏 Mods 目录
 - 失败即停 / 跳过失败继续，两种模式可选
 - 后台线程运行，界面不卡顿
-- 配置保存在 %APPDATA%\WorkshopDL-PS\config.json
+- 配置保存在 `%APPDATA%\WorkshopDL-PS\config.json`
 
 ## 使用前提
 
@@ -29,7 +29,7 @@ SteamCMD 需要先缓存登录凭据，打开命令行运行一次：
 
     D:\steamcmd\steamcmd.exe +login 你的Steam用户名
 
-输入密码和 Steam Guard 验证码后，输入 quit 退出。之后脚本才能自动登录。
+输入密码和 Steam Guard 验证码后，输入 `quit` 退出。之后脚本才能自动登录。
 
 ## 使用方式
 
@@ -39,9 +39,9 @@ SteamCMD 需要先缓存登录凭据，打开命令行运行一次：
 
 首次运行会弹出全局设置窗口，填入：
 
-- SteamCMD 路径（如 D:\steamcmd\steamcmd.exe）
+- SteamCMD 路径（如 `D:\steamcmd\steamcmd.exe`）
 - Steam 用户名
-- 下载临时目录（如 D:\SteamMods）
+- 下载临时目录（如 `D:\SteamMods`）
 
 之后进入主界面，点「配置当前游戏」为每个游戏单独设置 Mods 目录。
 
@@ -50,6 +50,18 @@ SteamCMD 需要先缓存登录凭据，打开命令行运行一次：
     Install-Module ps2exe -Scope CurrentUser -Force
     Import-Module ps2exe
     Invoke-ps2exe -InputFile "WorkshopDL-PS.ps1" -OutputFile "WorkshopDL-PS.exe" -noConsole
+
+## 从订阅列表批量导出
+
+如果你在创意工坊订阅了几百个 Mod，手动找 ID 太麻烦，推荐这个流程：
+
+1. 用 [steam-workshop-linker](https://github.com/DLW114/steam-workshop-linker) 导出你的订阅列表（浏览器脚本，一键生成 `.txt`）
+2. 打开本工具，点「从文件导入」，选择那个 `.txt`
+3. 点「开始下载」
+
+工具会自动识别文件格式：
+- `workshop_download_item <appid> <modid>` 格式（SteamCMD 脚本）
+- 纯数字 ID 列表
 
 ## 支持的平台
 
@@ -89,6 +101,14 @@ SteamCMD 需要先缓存登录凭据，打开命令行运行一次：
 **Q: 如何更新已下载的 Mod？**
 
 直接重新粘贴 Mod ID 再点开始下载即可覆盖。
+
+**Q: 提示「文件是空的」？**
+
+导入的文件没有内容，检查是不是选错了文件。
+
+## 相关项目
+
+- [steam-workshop-linker](https://github.com/DLW114/steam-workshop-linker) —— 浏览器脚本，一键提取你在 Steam 创意工坊订阅的所有 Mod ID，输出标准 SteamCMD 脚本文件，可直接被本工具的「从文件导入」识别。
 
 ## 免责声明
 

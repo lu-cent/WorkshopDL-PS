@@ -445,8 +445,14 @@ $form.Controls.Add($btnGlobalSettings)
 $lbl = New-Object System.Windows.Forms.Label
 $lbl.Text = "粘贴 Mod ID（每行一个 / 逗号 / 空格 / 创意工坊链接都行）："
 $lbl.Location = [System.Drawing.Point]::new(12, 48)
-$lbl.Size = [System.Drawing.Size]::new(680, 20)
+$lbl.Size = [System.Drawing.Size]::new(500, 20)
 $form.Controls.Add($lbl)
+
+$btnImport = New-Object System.Windows.Forms.Button
+$btnImport.Text = "从文件导入"
+$btnImport.Location = [System.Drawing.Point]::new(600, 45)
+$btnImport.Size = [System.Drawing.Size]::new(112, 26)
+$form.Controls.Add($btnImport)
 
 # 输入框
 $txtInput            = New-Object System.Windows.Forms.TextBox
@@ -695,6 +701,52 @@ $btnGo.Add_Click({
     $modeText = if ($rbStop.Checked) { "失败即停" } else { "跳过失败继续" }
     [void]$sync.Log.Add("[系统] 游戏：$($gameCfg.Name) | 识别到 $($ids.Count) 个 Mod ID | 模式：$modeText")
     Start-Download -Ids $ids
+})
+
+$btnImport.Add_Click({
+    $fd = New-Object System.Windows.Forms.OpenFileDialog
+    $fd.Filter = "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*"
+    $fd.Title = "选择包含 Mod ID 列表的文件"
+    if ($fd.ShowDialog() -ne "OK") { return }
+
+    try {
+        # 用 .NET 方法读取，空文件也能返回 ""，不会返回 $null
+        $content = [System.IO.File]::ReadAllText($fd.FileName)
+
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            [System.Windows.Forms.MessageBox]::Show("文件为空，请选择包含 Mod ID 的文件")
+            return
+        }
+
+        # 优先匹配 workshop_download_item <appid> <modid> 格式（DLW114 脚本的输出）
+        $m = [regex]::Matches($content, 'workshop_download_item\s+\d+\s+(\d{6,})')
+        if ($m.Count -gt 0) {
+            $ids = $m | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+            [void]$sync.Log.Add("[系统] 识别为 SteamCMD 脚本格式")
+        } else {
+            # 退回到提取所有 6 位以上数字
+            $ids = [regex]::Matches($content, '\d{6,}') | ForEach-Object { $_.Value } | Select-Object -Unique
+            [void]$sync.Log.Add("[系统] 识别为纯 ID 列表格式")
+        }
+
+        if (-not $ids -or $ids.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("文件中没有找到有效的 Mod ID")
+            return
+        }
+
+        # 追加到输入框，不覆盖已有内容
+        $existing = $txtInput.Text.Trim()
+        if ($existing) {
+            $txtInput.Text = $existing + "`r`n" + ($ids -join "`r`n")
+        } else {
+            $txtInput.Text = $ids -join "`r`n"
+        }
+
+        $fileName = [System.IO.Path]::GetFileName($fd.FileName)
+        [void]$sync.Log.Add("[系统] 从 $fileName 导入了 $($ids.Count) 个 Mod ID")
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("读取文件失败：$_")
+    }
 })
 
 $btnClear.Add_Click({ $txtLog.Clear() })
