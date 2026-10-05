@@ -9,6 +9,7 @@ Add-Type -AssemblyName System.Drawing
 # ---------------- 常量 ----------------
 $ConfigDir  = Join-Path $env:APPDATA "WorkshopDL-PS"
 $ConfigPath = Join-Path $ConfigDir "config.json"
+$BatchSize  = 20    # 每次 SteamCMD 调用合并下载的 Mod 数量
 
 # ---------------- 游戏预设列表 ----------------
 $GamePresets = @(
@@ -405,7 +406,7 @@ $sync.Log      = [System.Collections.ArrayList]::Synchronized([System.Collection
 $sync.Running  = $false
 $sync.Cfg      = $Cfg
 $sync.AppId    = ""
-$sync.FailFast = $true   # 默认失败即停
+$sync.FailFast = $true
 
 # ---------------- 主窗口 ----------------
 $form            = New-Object System.Windows.Forms.Form
@@ -561,47 +562,135 @@ function Start-Download {
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
     [void]$ps.AddScript({
-        param($Ids)
+        param($Ids, $BatchSize)
 
         function Write-Log([string]$msg) {
             [void]$sync.Log.Add(("[" + (Get-Date -Format 'HH:mm:ss') + "] " + $msg))
         }
 
-        $cfg      = $sync.Cfg
-        $appId    = $sync.AppId
-        $failFast = $sync.FailFast
-        $gameCfg  = $cfg.Games[$appId]
-        $total    = $Ids.Count
-        $i        = 0
-        $okCount  = 0
+        $cfg       = $sync.Cfg
+        $appId     = $sync.AppId
+        $failFast  = $sync.FailFast
+        $gameCfg   = $cfg.Games[$appId]
+        $total     = $Ids.Count
+        $okCount   = 0
         $failCount = 0
+        $maxRetry  = 3
+        $numBatches = [Math]::Ceiling($total / $BatchSize)
+        $globalIdx = 0
+        $batchNo   = 0
 
-        foreach ($id in $Ids) {
-            $i++
-            Write-Log "($i/$total) 下载 $id ..."
+        while ($globalIdx -lt $total) {
+            $batchNo++
+            $bStart = $globalIdx
+            $bEnd   = [Math]::Min($globalIdx + $BatchSize - 1, $total - 1)
+            $pending = @($Ids[$bStart..$bEnd])
+            $globalIdx = $bEnd + 1
 
-            $sargs = @(
-                "+force_install_dir", $cfg.InstallDir,
-                "+login", $cfg.SteamUser,
-                "+workshop_download_item", $appId, $id,
-                "+quit"
-            )
+            Write-Log "(批次 $batchNo/$numBatches) 下载 $($pending.Count) 个 Mod：$($pending -join ', ')"
 
             $output = ""
-            try {
-                $output = (& $cfg.SteamCmd @sargs 2>&1 | Out-String)
-            } catch {
-                $output = "EXCEPTION: $_"
+
+            # ---------- 重试循环 ----------
+            for ($attempt = 1; $attempt -le $maxRetry; $attempt++) {
+                $tempOut = [System.IO.Path]::GetTempFileName()
+                $tempErr = "$tempOut.err"
+                try {
+                    # 合并本批所有待下载 ID，一次 SteamCMD 调用完成下载
+                    $sargs = @(
+                        "+force_install_dir", $cfg.InstallDir,
+                        "+login", $cfg.SteamUser
+                    )
+                    foreach ($id in $pending) {
+                        $sargs += @("+workshop_download_item", $appId, $id)
+                    }
+                    $sargs += "+quit"
+                    # 参数手动加引号，防止含空格的路径/用户名被拆分
+                    $quotedArgs = @($sargs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' })
+
+                    # 用 Start-Process 调用，给 SteamCMD 一个独立的隐藏 console
+                    Start-Process -FilePath $cfg.SteamCmd `
+                        -ArgumentList $quotedArgs `
+                        -Wait -PassThru `
+                        -WindowStyle Hidden `
+                        -RedirectStandardOutput $tempOut `
+                        -RedirectStandardError $tempErr | Out-Null
+                    $output = (Get-Content $tempOut -Raw -ErrorAction SilentlyContinue)
+                    if (-not $output) { $output = "" }
+                    $errOut = (Get-Content $tempErr -Raw -ErrorAction SilentlyContinue)
+                    if ($errOut) { $output += "`n" + $errOut }
+                } catch {
+                    $output = "EXCEPTION: $_"
+                } finally {
+                    Remove-Item $tempOut, $tempErr -Force -ErrorAction SilentlyContinue
+                }
+
+                # 方式一：输出匹配到 Success，提取每个成功的 ID
+                $okIds = @()
+                foreach ($m in [regex]::Matches($output, 'Success\.\s*Downloaded item\s+(\d+)')) {
+                    $okId = $m.Groups[1].Value
+                    if ($okIds -notcontains $okId) { $okIds += $okId }
+                }
+
+                # 方式二：文件系统兜底——目标目录里有文件
+                foreach ($id in $pending) {
+                    if ($okIds -contains $id) { continue }
+                    $checkPath = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
+                    if (Test-Path $checkPath) {
+                        $fileCount = (Get-ChildItem $checkPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+                        if ($fileCount -gt 0) {
+                            Write-Log "    ⚠ [$id] 输出未捕获，但目录已有文件（$fileCount 个），视为成功"
+                            $okIds += $id
+                        }
+                    }
+                }
+
+                # 成功的 ID 立即移出待重试集合，并复制到 Mods 目录
+                $newlyOk = @($pending | Where-Object { $okIds -contains $_ })
+                if ($newlyOk.Count -gt 0) {
+                    if ($attempt -gt 1) { Write-Log "    √ 第 $attempt 次尝试成功：$($newlyOk -join ', ')" }
+                    foreach ($id in $newlyOk) {
+                        $okCount++
+                        Write-Log "    √ [$id] 下载成功"
+
+                        $src = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
+                        if (Test-Path $src) {
+                            if ($gameCfg.CopyToMods -and $gameCfg.ModsDir) {
+                                $dst = Join-Path $gameCfg.ModsDir $id
+                                if (-not (Test-Path $dst)) {
+                                    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+                                }
+                                Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
+                                Write-Log "    √ [$id] 已复制到 $($gameCfg.ModsDir)"
+                            } else {
+                                Write-Log "    √ [$id] 已下载到 $src（未复制）"
+                            }
+                        } else {
+                            Write-Log "    ⚠ [$id] 下载标记成功但目录不存在，检查 $src"
+                        }
+                    }
+                    $pending = @($pending | Where-Object { $okIds -notcontains $_ })
+                }
+
+                if ($pending.Count -eq 0) { break }
+
+                if ($attempt -lt $maxRetry) {
+                    Write-Log "    第 $attempt 次尝试后仍有 $($pending.Count) 个失败：$($pending -join ', ')，3 秒后重试..."
+                    Start-Sleep -Seconds 3
+                }
             }
+            # ---------- 重试循环结束 ----------
 
-            # 判断成功：匹配 "Success. Downloaded item"
-            $success = ($output -match 'Success\.\s*Downloaded item')
+            if ($pending.Count -gt 0) {
+                foreach ($id in $pending) {
+                    $failCount++
+                    Write-Log "    × [$id] 下载失败（已重试 $maxRetry 次）"
+                }
 
-            if (-not $success) {
-                $failCount++
-                Write-Log "    × 下载失败"
+                $tailLines = ($output -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 5) -join " | "
+                if ($tailLines) { Write-Log "    最后输出：$tailLines" }
 
-                if ($i -eq 1) {
+                if ($batchNo -eq 1) {
                     Write-Log "  可能原因："
                     Write-Log "  1. 该游戏不支持匿名下载（需要拥有游戏）"
                     Write-Log "  2. Mod ID 无效或已被删除"
@@ -616,28 +705,8 @@ function Start-Download {
                     $sync.Running = $false
                     return
                 } else {
-                    Write-Log "  → 跳过此 Mod，继续下一个"
-                    continue
+                    Write-Log "  → 跳过失败的 Mod，继续下一批"
                 }
-            }
-
-            $okCount++
-            Write-Log "    √ 下载成功"
-
-            $src = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
-            if (Test-Path $src) {
-                if ($gameCfg.CopyToMods -and $gameCfg.ModsDir) {
-                    $dst = Join-Path $gameCfg.ModsDir $id
-                    if (-not (Test-Path $dst)) {
-                        New-Item -ItemType Directory -Path $dst -Force | Out-Null
-                    }
-                    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
-                    Write-Log "    √ 已复制到 $($gameCfg.ModsDir)"
-                } else {
-                    Write-Log "    √ 已下载到 $src（未复制）"
-                }
-            } else {
-                Write-Log "    ⚠ 下载标记成功但目录不存在，检查 $src"
             }
         }
 
@@ -645,6 +714,7 @@ function Start-Download {
         $sync.Running = $false
     })
     [void]$ps.AddArgument($Ids)
+    [void]$ps.AddArgument($BatchSize)
 
     $script:Runspace = $rs
     $script:PSHandle = $ps.BeginInvoke()
@@ -710,21 +780,18 @@ $btnImport.Add_Click({
     if ($fd.ShowDialog() -ne "OK") { return }
 
     try {
-        # 用 .NET 方法读取，空文件也能返回 ""，不会返回 $null
         $content = [System.IO.File]::ReadAllText($fd.FileName)
 
         if ([string]::IsNullOrWhiteSpace($content)) {
-            [System.Windows.Forms.MessageBox]::Show("文件为空，请选择包含 Mod ID 的文件")
+            [System.Windows.Forms.MessageBox]::Show("文件是空的，请选择包含 Mod ID 的文件")
             return
         }
 
-        # 优先匹配 workshop_download_item <appid> <modid> 格式（DLW114 脚本的输出）
         $m = [regex]::Matches($content, 'workshop_download_item\s+\d+\s+(\d{6,})')
         if ($m.Count -gt 0) {
             $ids = $m | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
             [void]$sync.Log.Add("[系统] 识别为 SteamCMD 脚本格式")
         } else {
-            # 退回到提取所有 6 位以上数字
             $ids = [regex]::Matches($content, '\d{6,}') | ForEach-Object { $_.Value } | Select-Object -Unique
             [void]$sync.Log.Add("[系统] 识别为纯 ID 列表格式")
         }
@@ -734,7 +801,6 @@ $btnImport.Add_Click({
             return
         }
 
-        # 追加到输入框，不覆盖已有内容
         $existing = $txtInput.Text.Trim()
         if ($existing) {
             $txtInput.Text = $existing + "`r`n" + ($ids -join "`r`n")
