@@ -98,6 +98,7 @@ function Test-GlobalConfigComplete($cfg) {
             $cfg.InstallDir -and $cfg.SteamUser)
 }
 
+
 # ---------------- 全局设置窗口 ----------------
 function Show-GlobalSettingsDialog {
     param($CurrentCfg)
@@ -325,6 +326,10 @@ function Show-ManageGamesDialog {
             [System.Windows.Forms.MessageBox]::Show("AppID 和游戏名称不能为空")
             return
         }
+        if ($appId -notmatch '^\d+$') {
+            [System.Windows.Forms.MessageBox]::Show("AppID 必须是纯数字")
+            return
+        }
         if ($Cfg.Games.ContainsKey($appId)) {
             [System.Windows.Forms.MessageBox]::Show("该 AppID 已存在")
             return
@@ -353,6 +358,10 @@ function Show-ManageGamesDialog {
         $appId = $txtAppId.Text.Trim()
         $name  = $txtName.Text.Trim()
         if (-not $appId -or -not $name) { return }
+        if ($appId -notmatch '^\d+$') {
+            [System.Windows.Forms.MessageBox]::Show("AppID 必须是纯数字")
+            return
+        }
 
         if ($appId -ne $oldAppId) {
             if ($Cfg.Games.ContainsKey($appId)) {
@@ -553,9 +562,19 @@ function Start-Download {
 
     if ($script:PSHandle -and -not $script:PSHandle.IsCompleted) { return }
 
+    # 清理上一次已完成的 runspace/ps，避免句柄与线程泄漏
+    if ($script:PSHandle) {
+        try { $script:PSHandle.Dispose() } catch { }
+        $script:PSHandle = $null
+    }
+    if ($script:Runspace) {
+        try { $script:Runspace.Dispose() } catch { }
+        $script:Runspace = $null
+    }
+
     $rs = [runspacefactory]::CreateRunspace()
-    $rs.ApartmentState = "MTA"
-    $rs.ThreadOptions  = "ReuseThread"
+    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.ThreadOptions  = [System.Management.Automation.PSThreadOptions]::ReuseThread
     $rs.Open()
     $rs.SessionStateProxy.SetVariable("sync", $sync)
 
@@ -566,6 +585,15 @@ function Start-Download {
 
         function Write-Log([string]$msg) {
             [void]$sync.Log.Add(("[" + (Get-Date -Format 'HH:mm:ss') + "] " + $msg))
+        }
+
+        # runspace 与主脚本作用域隔离，此处需重复定义命令行参数转义函数
+        function ConvertTo-ArgString([string]$a) {
+            if ($null -eq $a -or $a -eq '') { return '""' }
+            if ($a -notmatch '[\s"]') { return $a }
+            $s = [regex]::Replace($a, '(\\*)"', '$1$1\"')
+            $s = [regex]::Replace($s, '(\\+)$', '$1$1')
+            return '"' + $s + '"'
         }
 
         $cfg       = $sync.Cfg
@@ -589,6 +617,15 @@ function Start-Download {
 
             Write-Log "(批次 $batchNo/$numBatches) 下载 $($pending.Count) 个 Mod：$($pending -join ', ')"
 
+            # 记录本批各 ID 下载前的文件数，兜底时对比，避免把残留/半成品误判为成功
+            $baseline = @{}
+            foreach ($id in $pending) {
+                $bp = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
+                $baseline[$id] = if (Test-Path $bp) {
+                    (Get-ChildItem $bp -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+                } else { 0 }
+            }
+
             $output = ""
 
             # ---------- 重试循环 ----------
@@ -597,16 +634,17 @@ function Start-Download {
                 $tempErr = "$tempOut.err"
                 try {
                     # 合并本批所有待下载 ID，一次 SteamCMD 调用完成下载
+                    $loginUser = if ($cfg.SteamUser) { $cfg.SteamUser } else { "anonymous" }
                     $sargs = @(
                         "+force_install_dir", $cfg.InstallDir,
-                        "+login", $cfg.SteamUser
+                        "+login", $loginUser
                     )
                     foreach ($id in $pending) {
                         $sargs += @("+workshop_download_item", $appId, $id)
                     }
                     $sargs += "+quit"
-                    # 参数手动加引号，防止含空格的路径/用户名被拆分
-                    $quotedArgs = @($sargs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' })
+                    # 按 Windows 规则转义参数，防止含空格/引号的路径被拆分
+                    $quotedArgs = @($sargs | ForEach-Object { ConvertTo-ArgString $_ })
 
                     # 用 Start-Process 调用，给 SteamCMD 一个独立的隐藏 console
                     Start-Process -FilePath $cfg.SteamCmd `
@@ -632,15 +670,19 @@ function Start-Download {
                     if ($okIds -notcontains $okId) { $okIds += $okId }
                 }
 
-                # 方式二：文件系统兜底——目标目录里有文件
-                foreach ($id in $pending) {
-                    if ($okIds -contains $id) { continue }
-                    $checkPath = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
-                    if (Test-Path $checkPath) {
-                        $fileCount = (Get-ChildItem $checkPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
-                        if ($fileCount -gt 0) {
-                            Write-Log "    ⚠ [$id] 输出未捕获，但目录已有文件（$fileCount 个），视为成功"
-                            $okIds += $id
+                # 方式二：文件系统兜底——仅在最后一次重试后启用，且要求文件数相比下载前确有增加，
+                # 避免把中途失败留下的半成品或历史残留误判为成功
+                if ($attempt -eq $maxRetry) {
+                    foreach ($id in $pending) {
+                        if ($okIds -contains $id) { continue }
+                        $checkPath = Join-Path $cfg.InstallDir "steamapps\workshop\content\$appId\$id"
+                        if (Test-Path $checkPath) {
+                            $fileCount = (Get-ChildItem $checkPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+                            $baseCount = if ($baseline.ContainsKey($id)) { $baseline[$id] } else { 0 }
+                            if ($fileCount -gt $baseCount) {
+                                Write-Log "    ⚠ [$id] 输出未捕获，但目录文件数由 $baseCount 增至 $fileCount，视为成功"
+                                $okIds += $id
+                            }
                         }
                     }
                 }
@@ -726,8 +768,14 @@ $timer.Interval = 300
 $timer.Add_Tick({
     $items = $sync.Log.ToArray()
     if ($items.Count -gt 0) {
-        $sync.Log.Clear()
+        # 按已取出数量删除，避免 ToArray 与 Clear 之间新写入的日志被误删
+        $sync.Log.RemoveRange(0, $items.Count)
         foreach ($line in $items) { $txtLog.AppendText("$line`r`n") }
+        # 日志无限增长会拖慢 UI，超过上限时截断头部
+        $maxLogChars = 200000
+        if ($txtLog.TextLength -gt $maxLogChars) {
+            $txtLog.Text = $txtLog.Text.Substring($txtLog.TextLength - $maxLogChars)
+        }
         $txtLog.SelectionStart = $txtLog.Text.Length
         $txtLog.ScrollToCaret()
     }
@@ -751,6 +799,11 @@ $btnGo.Add_Click({
 
     $appId   = $cmbGame.SelectedItem.AppId
     $gameCfg = $Cfg.Games[$appId]
+
+    if ($appId -notmatch '^\d+$') {
+        [System.Windows.Forms.MessageBox]::Show("AppID 非法（应为纯数字）：$appId")
+        return
+    }
 
     if ($gameCfg.CopyToMods -and -not $gameCfg.ModsDir) {
         [System.Windows.Forms.MessageBox]::Show("该游戏尚未配置 Mods 目录，请点击「管理游戏」或「配置当前游戏」")
@@ -780,7 +833,7 @@ $btnImport.Add_Click({
     if ($fd.ShowDialog() -ne "OK") { return }
 
     try {
-        $content = [System.IO.File]::ReadAllText($fd.FileName)
+        $content = [System.IO.File]::ReadAllText($fd.FileName, [System.Text.Encoding]::UTF8)
 
         if ([string]::IsNullOrWhiteSpace($content)) {
             [System.Windows.Forms.MessageBox]::Show("文件是空的，请选择包含 Mod ID 的文件")
@@ -930,6 +983,7 @@ if (-not (Test-GlobalConfigComplete $Cfg)) {
         $sync.Cfg = $Cfg
     } else {
         [System.Windows.Forms.MessageBox]::Show("未完成设置，程序将退出。")
+        $timer.Stop()
         return
     }
 }
@@ -939,5 +993,12 @@ if (-not (Test-GlobalConfigComplete $Cfg)) {
 
 # ---------------- 清理 ----------------
 $timer.Stop()
-if ($script:PSHandle) { $script:PSHandle.AsyncWaitHandle.Close() }
-if ($script:Runspace) { $script:Runspace.Close() }
+$timer.Dispose()
+if ($script:PSHandle) {
+    try { $script:PSHandle.AsyncWaitHandle.Close() } catch { }
+    try { $script:PSHandle.Dispose() } catch { }
+}
+if ($script:Runspace) {
+    try { $script:Runspace.Close() } catch { }
+    try { $script:Runspace.Dispose() } catch { }
+}
