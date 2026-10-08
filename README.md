@@ -4,6 +4,10 @@
 
 带图形界面的 Steam 创意工坊 Mod 批量下载器，基于 SteamCMD，零依赖。
 
+## 下载
+
+前往 [Releases](https://github.com/lu-cent/WorkshopDL-PS/releases) 页面下载最新版 `WorkshopDL-PS.exe`，双击即可运行（无需安装 PowerShell 模块）。
+
 ## 特性
 
 - 纯 PowerShell + WinForms，Windows 系统自带，无需安装任何运行环境
@@ -40,8 +44,8 @@ SteamCMD 需要先缓存登录凭据，打开命令行运行一次：
 首次运行会弹出全局设置窗口，填入：
 
 - SteamCMD 路径（如 `D:\steamcmd\steamcmd.exe`）
-- Steam 用户名
-- 下载临时目录（如 `D:\SteamMods`）
+- Steam 用户名（留空则匿名登录）
+- SteamCMD 目录（如 `D:\steamcmd`，即 steamcmd.exe 所在目录）
 
 之后进入主界面，点「配置当前游戏」为每个游戏单独设置 Mods 目录。
 

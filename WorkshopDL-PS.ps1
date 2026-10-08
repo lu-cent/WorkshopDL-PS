@@ -7,6 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # ---------------- 常量 ----------------
+$AppVersion = "1.2.0"
 $ConfigDir  = Join-Path $env:APPDATA "WorkshopDL-PS"
 $ConfigPath = Join-Path $ConfigDir "config.json"
 $BatchSize  = 20    # 每次 SteamCMD 调用合并下载的 Mod 数量
@@ -78,6 +79,7 @@ function Load-Config {
             if (-not $cfg.ContainsKey("SteamUser"))  { $cfg.SteamUser = "" }
             if (-not $cfg.ContainsKey("InstallDir")) { $cfg.InstallDir = "" }
             if (-not $cfg.ContainsKey("LastGame"))   { $cfg.LastGame = "" }
+            $cfg.InstallDir = Normalize-InstallDir $cfg.InstallDir
             return $cfg
         } catch {
             return Get-DefaultConfig
@@ -93,9 +95,20 @@ function Save-Config($cfg) {
     $cfg | ConvertTo-Json -Depth 10 | Set-Content $ConfigPath -Encoding UTF8
 }
 
+function Normalize-InstallDir([string]$dir) {
+    # SteamCMD 的 +force_install_dir 需要 Steam 根目录，
+    # 若用户误填到 steamapps/... 子路径，自动截断回根目录
+    if (-not $dir) { return $dir }
+    $d = $dir.TrimEnd('\', '/')
+    $marker = '\steamapps'
+    $idx = $d.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($idx -gt 0) { return $d.Substring(0, $idx) }
+    return $dir
+}
+
 function Test-GlobalConfigComplete($cfg) {
     return ($cfg.SteamCmd -and (Test-Path $cfg.SteamCmd) -and
-            $cfg.InstallDir -and $cfg.SteamUser)
+            $cfg.InstallDir -and (Test-Path $cfg.InstallDir) -and $cfg.SteamUser)
 }
 
 
@@ -104,7 +117,7 @@ function Show-GlobalSettingsDialog {
     param($CurrentCfg)
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "全局设置"
+    $dlg.Text = "全局设置 - WorkshopDL-PS v$AppVersion"
     $dlg.Size = [System.Drawing.Size]::new(560, 220)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -115,7 +128,7 @@ function Show-GlobalSettingsDialog {
     $fields = @(
         @{ Key="SteamCmd";   Label="SteamCMD 路径："; IsFile=$true  },
         @{ Key="SteamUser";  Label="Steam 用户名：";  IsFile=$false },
-        @{ Key="InstallDir"; Label="下载临时目录：";  IsFile=$false }
+        @{ Key="InstallDir"; Label="SteamCMD 目录：";  IsFile=$false }
     )
 
     $boxes = @{}
@@ -419,7 +432,7 @@ $sync.FailFast = $true
 
 # ---------------- 主窗口 ----------------
 $form            = New-Object System.Windows.Forms.Form
-$form.Text       = "WorkshopDL-PS - Steam 创意工坊下载器"
+$form.Text       = "WorkshopDL-PS v$AppVersion - Steam 创意工坊下载器"
 $form.Size       = [System.Drawing.Size]::new(740, 620)
 $form.StartPosition = "CenterScreen"
 $form.Font       = [System.Drawing.Font]::new("Microsoft YaHei UI", 9)

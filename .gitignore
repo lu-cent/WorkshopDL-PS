@@ -1,4 +1,5 @@
 ﻿*.exe
+*.exe.config
 *.dll
 config.json
 *.log
