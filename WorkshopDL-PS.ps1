@@ -586,8 +586,8 @@ function Start-Download {
     }
 
     $rs = [runspacefactory]::CreateRunspace()
-    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
-    $rs.ThreadOptions  = [System.Management.Automation.PSThreadOptions]::ReuseThread
+    $rs.ApartmentState = "MTA"
+    $rs.ThreadOptions  = "ReuseThread"
     $rs.Open()
     $rs.SessionStateProxy.SetVariable("sync", $sync)
 
